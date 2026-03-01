@@ -1,0 +1,24 @@
+[project]
+name = "whalecum-backend"
+version = "0.1.0"
+description = "WhaleCum 13F Tracker API"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.28",
+    "python-multipart>=0.0.17",
+    "beautifulsoup4>=4.12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
+
+[tool.pixi.tasks]
+start = "uvicorn main:app --reload --host 0.0.0.0 --port 8000"
+serve = "uvicorn main:app --host 0.0.0.0 --port 8000"
