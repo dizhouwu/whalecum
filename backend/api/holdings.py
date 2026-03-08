@@ -30,12 +30,16 @@ def get_holdings(cik: str):
     holdings = get_13f_holdings(fund["cik"], accession)
     sorted_holdings = sorted(holdings, key=lambda h: h.get("value", 0), reverse=True)
     total_value = sum(h.get("value", 0) for h in holdings)
+    top5_val = sum(h.get("value", 0) for h in sorted_holdings[:5])
+    top10_val = sum(h.get("value", 0) for h in sorted_holdings[:10])
     return {
         "fund": fund["name"],
         "cik": fund["cik"],
         "report_date": report_date,
         "accession": accession,
         "total_value": total_value,
+        "concentration_pct_top5": round(100.0 * top5_val / total_value, 1) if total_value else 0,
+        "concentration_pct_top10": round(100.0 * top10_val / total_value, 1) if total_value else 0,
         "holdings": sorted_holdings,
     }
 
@@ -61,11 +65,15 @@ def get_all_holdings():
         holdings = get_13f_holdings(fund["cik"], accession)
         sorted_holdings = sorted(holdings, key=lambda h: h.get("value", 0), reverse=True)
         total_value = sum(h.get("value", 0) for h in holdings)
+        top5_val = sum(h.get("value", 0) for h in sorted_holdings[:5])
+        top10_val = sum(h.get("value", 0) for h in sorted_holdings[:10])
         results.append({
             "fund": fund["name"],
             "cik": fund["cik"],
             "report_date": report_date,
             "total_value": total_value,
+            "concentration_pct_top5": round(100.0 * top5_val / total_value, 1) if total_value else 0,
+            "concentration_pct_top10": round(100.0 * top10_val / total_value, 1) if total_value else 0,
             "holdings": sorted_holdings,
         })
     return {"holdings": results}

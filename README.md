@@ -69,6 +69,8 @@ Open http://localhost:5173. The dev server proxies `/api` to the backend.
 
 **Note**: SEC requires a User-Agent. Default is `WhaleCum AdminContact@whalecum.local`. Edit `backend/config.py` if needed. The app adds short delays between SEC requests to stay under the 10 req/s limit.
 
+**Caching**: 13F filings are final 45 days after quarter end (plus 1 month reporting window). The backend caches submissions (1 day TTL) and holdings (90 days TTL) under `backend/.cache/` so you can develop without hitting the network. Cache keys are by CIK and accession only — adding more funds in `funds.json` will cache their data on first use. Set `CACHE_ENABLED = False` in `backend/config.py` to always fetch live.
+
 ## Fund list
 
 Edit `backend/funds.json` (JSON array of `{"name": "...", "cik": "..."}`). Add any institutional manager’s SEC CIK. Changes apply on next request (no restart). Example for value-oriented names: add CIKs for Baupost, Third Point, etc.
@@ -77,8 +79,9 @@ Edit `backend/funds.json` (JSON array of `{"name": "...", "cik": "..."}`). Add a
 
 - `GET /api/funds` — List funds (from funds.json) with latest 13F info
 - `GET /api/funds/{cik}/history?quarters=5` — Last 5 quarters of holdings (time-series)
-- `GET /api/funds/{cik}/changes` — Double-downs, new entries, exits, exits from 5q ago
-- `GET /api/holdings` — All funds' latest holdings (cross-section)
-- `GET /api/holdings/{cik}` — Single fund latest holdings
+- `GET /api/funds/{cik}/changes` — Double-downs, trims, new entries, exits, exits from 5q, stalwarts/fading/new_in_5q
+- `GET /api/holdings` — All funds' latest holdings (with total_value, concentration)
+- `GET /api/holdings/{cik}` — Single fund latest holdings (with concentration)
 - `GET /api/insights/consensus` — Stocks held by all funds
 - `GET /api/insights/popular` — Most held stocks across funds
+- `GET /api/insights/changes` — Cross-fund: consensus add, consensus exit, divergence

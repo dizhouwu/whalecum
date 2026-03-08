@@ -37,3 +37,10 @@ SEC_BASE_URL = "https://data.sec.gov"
 SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar"
 # SEC requires User-Agent with format "Company AdminContact@domain" - see sec.gov/developer
 USER_AGENT = "WhaleCum AdminContact@whalecum.local"
+
+# Cache: 13F filings are final after 45d past quarter end; we cache to avoid repeated SEC requests.
+# Submissions: short TTL so we pick up new quarters. Holdings: long TTL (filing never changes).
+CACHE_DIR = _CONFIG_DIR / ".cache"
+CACHE_SUBMISSIONS_TTL_DAYS = 1   # refresh filing list daily
+CACHE_HOLDINGS_TTL_DAYS = 90     # 13F data is final once filed; long cache OK
+CACHE_ENABLED = True

@@ -4,6 +4,7 @@ import FundDetailPage from './pages/FundDetailPage'
 import FundsPage from './pages/FundsPage'
 import HoldingsPage from './pages/HoldingsPage'
 import InsightsPage from './pages/InsightsPage'
+import SecurityPage from './pages/SecurityPage'
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
           <Route path="/holdings" element={<HoldingsPage />} />
           <Route path="/holdings/:cik" element={<HoldingsPage />} />
           <Route path="/insights" element={<InsightsPage />} />
+          <Route path="/security/:id" element={<SecurityPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>

@@ -1,8 +1,9 @@
 """API endpoints for investment insights"""
-from collections import Counter
 from fastapi import APIRouter
 
+from api.funds import get_fund_changes_data
 from api.holdings import get_all_holdings
+from config import get_funds
 
 router = APIRouter()
 
@@ -104,4 +105,86 @@ def get_popular_holdings():
     return {
         "popular": popular,
         "funds_count": len([f for f in all_holdings if f.get("holdings")]),
+    }
+
+
+@router.get("/changes")
+def get_insights_changes():
+    """
+    Cross-fund change signals:
+    - consensus_add: names that ALL funds added to (double-down or new entry) this quarter
+    - consensus_exit: names that ALL funds reduced or exited (exit or trim) this quarter
+    - divergence: names where at least one fund added and at least one fund reduced/exited
+    """
+    import time
+
+    all_changes = []
+    for i, fund in enumerate(get_funds()):
+        if i > 0:
+            time.sleep(0.2)
+        data = get_fund_changes_data(fund["cik"])
+        if not data:
+            continue
+        all_changes.append(data)
+
+    if not all_changes:
+        return {
+            "consensus_add": [],
+            "consensus_exit": [],
+            "divergence": [],
+            "high_conviction": [],
+            "funds_count": 0,
+            "funds": [],
+        }
+
+    def names_from_holdings(holdings: list) -> set:
+        return {_normalize_name(h.get("name", "")) for h in holdings if h.get("name")}
+
+    added_per_fund = []
+    reduced_per_fund = []
+    for ch in all_changes:
+        added = names_from_holdings(ch.get("double_downs", []) + ch.get("new_entries", []))
+        reduced = names_from_holdings(ch.get("exits", []) + ch.get("trims", []))
+        added_per_fund.append(added)
+        reduced_per_fund.append(reduced)
+
+    consensus_add = set.intersection(*added_per_fund) if added_per_fund else set()
+    consensus_exit = set.intersection(*reduced_per_fund) if reduced_per_fund else set()
+    all_added = set().union(*added_per_fund)
+    all_reduced = set().union(*reduced_per_fund)
+    divergence = all_added & all_reduced
+
+    def first_holding(name_norm: str, keys: list) -> dict | None:
+        for ch in all_changes:
+            for key in keys:
+                for h in ch.get(key, []):
+                    if _normalize_name(h.get("name", "")) == name_norm:
+                        return h
+        return None
+
+    consensus_add_list = [first_holding(n, ["double_downs", "new_entries"]) or {"name": n, "value": 0} for n in consensus_add]
+    consensus_exit_list = [first_holding(n, ["exits", "trims"]) or {"name": n, "value": 0} for n in consensus_exit]
+    divergence_list = [first_holding(n, ["double_downs", "new_entries", "exits", "trims"]) or {"name": n, "value": 0} for n in divergence]
+    for lst in (consensus_add_list, consensus_exit_list, divergence_list):
+        lst.sort(key=lambda x: x.get("value", 0), reverse=True)
+
+    high_conviction_flat = []
+    for ch in all_changes:
+        fund_name = ch.get("fund", "")
+        for h in ch.get("high_conviction", []):
+            high_conviction_flat.append({
+                "name": h.get("name", ""),
+                "value": h.get("value", 0),
+                "quarters_added": h.get("quarters_added", 0),
+                "fund": fund_name,
+            })
+    high_conviction_flat.sort(key=lambda x: (-x.get("quarters_added", 0), -x.get("value", 0)))
+
+    return {
+        "consensus_add": consensus_add_list,
+        "consensus_exit": consensus_exit_list,
+        "divergence": divergence_list,
+        "high_conviction": high_conviction_flat,
+        "funds_count": len(all_changes),
+        "funds": [c["fund"] for c in all_changes],
     }

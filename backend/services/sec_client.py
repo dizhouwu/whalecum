@@ -1,25 +1,75 @@
 """
 SEC EDGAR API client for fetching 13F filings.
 SEC requires User-Agent header - see https://www.sec.gov/developer
+Caches submissions and holdings locally (13F data is final after 45d past quarter end).
 """
+import json
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
-from config import SEC_ARCHIVES_URL, SEC_BASE_URL, USER_AGENT
+from config import (
+    CACHE_DIR,
+    CACHE_ENABLED,
+    CACHE_HOLDINGS_TTL_DAYS,
+    CACHE_SUBMISSIONS_TTL_DAYS,
+    SEC_ARCHIVES_URL,
+    SEC_BASE_URL,
+    USER_AGENT,
+)
 
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
 
+def _cache_path(subdir: str, name: str) -> Path:
+    p = CACHE_DIR / subdir
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{name}.json"
+
+
+def _cache_read(path: Path, ttl_days: int | None) -> Any | None:
+    if not CACHE_ENABLED or not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            entry = json.load(f)
+        if ttl_days is not None:
+            fetched = entry.get("fetched_at", 0)
+            if time.time() - fetched > ttl_days * 86400:
+                return None
+        return entry.get("data")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _cache_write(path: Path, data: Any) -> None:
+    if not CACHE_ENABLED:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"data": data, "fetched_at": time.time()}, f, separators=(",", ":"))
+    except OSError:
+        pass
+
+
 def get_submissions(cik: str) -> dict[str, Any] | None:
-    """Fetch company submissions (filing history) from SEC."""
+    """Fetch company submissions (filing history) from SEC. Uses cache (1d TTL)."""
     cik_padded = cik.zfill(10)
+    cache_file = _cache_path("submissions", cik_padded)
+    cached = _cache_read(cache_file, CACHE_SUBMISSIONS_TTL_DAYS)
+    if cached is not None:
+        return cached
     url = f"{SEC_BASE_URL}/submissions/CIK{cik_padded}.json"
     with httpx.Client(timeout=30.0, headers=HEADERS) as client:
         resp = client.get(url)
         if resp.status_code != 200:
             return None
-        return resp.json()
+        data = resp.json()
+    _cache_write(cache_file, data)
+    return data
 
 
 def get_latest_13f_accession(cik: str) -> tuple[str | None, str | None]:
@@ -83,24 +133,56 @@ def _accession_to_path(accession: str) -> str:
 def get_13f_holdings(cik: str, accession: str) -> list[dict]:
     """
     Fetch and parse 13F holdings from infotable.xml.
-    Returns list of holdings with: name, cusip, value, shares, title_of_class
+    Returns list of holdings with: name, cusip, value, shares, title_of_class.
+    Cached by (cik, accession); 13F data is final once filed so long TTL.
     """
-    cik_stripped = cik.lstrip("0") or "0"
+    cik_norm = cik.lstrip("0") or "0"
+    accession_safe = accession.replace("-", "_")
+    cache_file = _cache_path("holdings", f"{cik_norm}_{accession_safe}")
+    cached = _cache_read(cache_file, CACHE_HOLDINGS_TTL_DAYS)
+    if cached is not None:
+        return cached
     path = _accession_to_path(accession)
-    # Try X02 format first (newer), fall back to X01
     for subdir in ["xslForm13F_X02", "xslForm13F_X01"]:
-        url = f"{SEC_ARCHIVES_URL}/data/{cik_stripped}/{path}/{subdir}/infotable.xml"
+        url = f"{SEC_ARCHIVES_URL}/data/{cik_norm}/{path}/{subdir}/infotable.xml"
         with httpx.Client(timeout=30.0, headers=HEADERS) as client:
             resp = client.get(url)
             if resp.status_code == 200:
-                return _parse_infotable_xml(resp.text)
+                holdings = _parse_infotable_xml(resp.text)
+                _cache_write(cache_file, holdings)
+                return holdings
     return []
+
+
+def _is_boilerplate_name(name: str) -> bool:
+    """Filter out SEC/OMB footer text and other non-issuer rows."""
+    if not name or len(name) > 200:
+        return True
+    n = name.upper()
+    if n in (
+        "NAME OF ISSUER", "COLUMN 1", "VALUE", "SHRS OR", "PRN AMT",
+    ):
+        return True
+    # OMB / burden / form boilerplate
+    if "OMB NUMBER" in n or "OMB Number" in name:
+        return True
+    if "ESTIMATED AVERAGE BURDEN" in n or "BURDEN HOURS" in n or "HOURS PER RESPONSE" in n:
+        return True
+    if "3235-0006" in name or "3235-0007" in name:
+        return True
+    if "PAPERWORK REDUCTION" in n or "DISCLOSURE" in n and "INFORMATION" in n and len(name) > 80:
+        return True
+    # Row that looks like a form disclaimer (long, no typical company pattern)
+    if len(name) > 100 and not any(s in n for s in ("INC", "CORP", "CO", "LTD", "PLC", "LP", "LLC", "COM")):
+        return True
+    return False
 
 
 def _parse_infotable_xml(html_text: str) -> list[dict]:
     """
     Parse SEC 13F infotable. SEC serves XSLT-transformed HTML, so we parse the table.
     Columns: Name, Title of Class, CUSIP, FIGI, Value, Shares, SH/PRN, Put/Call, ...
+    Skips header rows and OMB/boilerplate text that sometimes appears in the table.
     """
     from bs4 import BeautifulSoup
 
@@ -116,9 +198,7 @@ def _parse_infotable_xml(html_text: str) -> list[dict]:
                     continue
                 # Structure: name, title, cusip, (figi), value, shares, ...
                 name = all_cells[0].get_text(strip=True)
-                if not name or name.upper() in (
-                    "NAME OF ISSUER", "COLUMN 1", "VALUE", "SHRS OR", "PRN AMT",
-                ):
+                if _is_boilerplate_name(name):
                     continue
                 title_of_class = all_cells[1].get_text(strip=True) if len(all_cells) > 1 else ""
                 cusip = all_cells[2].get_text(strip=True) if len(all_cells) > 2 else ""
@@ -133,6 +213,9 @@ def _parse_infotable_xml(html_text: str) -> list[dict]:
                     shares = int(shares_str) if shares_str else 0
                 except ValueError:
                     shares = 0
+                # Skip rows with no economic content (avoid footer/empty lines)
+                if value <= 0 and shares <= 0:
+                    continue
                 holdings_list.append({
                     "name": name,
                     "title_of_class": title_of_class,
