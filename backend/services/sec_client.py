@@ -130,9 +130,42 @@ def _accession_to_path(accession: str) -> str:
     return accession.replace("-", "")
 
 
+def _discover_infotable_url(cik_norm: str, accession: str) -> str | None:
+    """
+    Fetch the filing index page and find the INFORMATION TABLE document URL.
+    Falls back to None if not found.
+    """
+    from bs4 import BeautifulSoup
+
+    path = _accession_to_path(accession)
+    index_url = f"{SEC_ARCHIVES_URL}/data/{cik_norm}/{path}/{accession}-index.htm"
+    try:
+        with httpx.Client(timeout=30.0, headers=HEADERS) as client:
+            resp = client.get(index_url)
+            if resp.status_code != 200:
+                return None
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for row in soup.find_all("tr"):
+            cells = row.find_all("td")
+            for cell in cells:
+                if "INFORMATION TABLE" in cell.get_text(strip=True).upper():
+                    link = row.find("a", href=True)
+                    if link:
+                        href = link["href"]
+                        # href is an absolute path like /Archives/edgar/data/...
+                        if href.startswith("/"):
+                            return f"https://www.sec.gov{href}"
+                        return href
+    except Exception:
+        pass
+    return None
+
+
 def get_13f_holdings(cik: str, accession: str) -> list[dict]:
     """
-    Fetch and parse 13F holdings from infotable.xml.
+    Fetch and parse 13F holdings from the information table XML.
+    Tries infotable.xml first (most common name), then discovers the real
+    filename from the filing index (some filers use custom names).
     Returns list of holdings with: name, cusip, value, shares, title_of_class.
     Cached by (cik, accession); 13F data is final once filed so long TTL.
     """
@@ -143,10 +176,20 @@ def get_13f_holdings(cik: str, accession: str) -> list[dict]:
     if cached is not None:
         return cached
     path = _accession_to_path(accession)
-    for subdir in ["xslForm13F_X02", "xslForm13F_X01"]:
-        url = f"{SEC_ARCHIVES_URL}/data/{cik_norm}/{path}/{subdir}/infotable.xml"
-        with httpx.Client(timeout=30.0, headers=HEADERS) as client:
+    # Try the standard infotable.xml name first
+    with httpx.Client(timeout=30.0, headers=HEADERS) as client:
+        for subdir in ["xslForm13F_X02", "xslForm13F_X01"]:
+            url = f"{SEC_ARCHIVES_URL}/data/{cik_norm}/{path}/{subdir}/infotable.xml"
             resp = client.get(url)
+            if resp.status_code == 200:
+                holdings = _parse_infotable_xml(resp.text)
+                _cache_write(cache_file, holdings)
+                return holdings
+    # Fall back: discover the actual filename from the filing index
+    discovered_url = _discover_infotable_url(cik_norm, accession)
+    if discovered_url:
+        with httpx.Client(timeout=30.0, headers=HEADERS) as client:
+            resp = client.get(discovered_url)
             if resp.status_code == 200:
                 holdings = _parse_infotable_xml(resp.text)
                 _cache_write(cache_file, holdings)
