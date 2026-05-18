@@ -38,15 +38,7 @@ interface SecurityDetail {
   }
 }
 
-const formatValue = (v: number) =>
-  new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 0,
-  }).format(v)
-
-const formatShort = (v: number) =>
-  v >= 1e9 ? `${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(0)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}K` : String(v)
+import { formatValue, formatShort } from '../lib/format'
 
 export default function SecurityPage() {
   const { id } = useParams()

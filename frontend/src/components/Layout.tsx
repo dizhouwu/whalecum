@@ -10,7 +10,7 @@ export default function Layout({ children }: LayoutProps) {
   const navLinks = [
     { to: '/', label: 'Funds' },
     { to: '/holdings', label: 'Holdings' },
-    { to: '/insights', label: 'Insights' },
+    { to: '/insights', label: 'Ideas' },
   ]
 
   return (

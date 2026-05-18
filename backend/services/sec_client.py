@@ -72,27 +72,44 @@ def get_submissions(cik: str) -> dict[str, Any] | None:
     return data
 
 
+def _recent_13f_rows(data: dict) -> list[tuple[str, str, str]]:
+    """(accession, report_date, filing_date) for each 13F-HR in recent filings."""
+    filings = data.get("filings", {}).get("recent", {})
+    forms = filings.get("form", [])
+    accessions = filings.get("accessionNumber", [])
+    report_dates = filings.get("reportDate", [])
+    filing_dates = filings.get("filingDate", [])
+    rows: list[tuple[str, str, str]] = []
+    for i, form in enumerate(forms):
+        if form != "13F-HR":
+            continue
+        acc = accessions[i] if i < len(accessions) else None
+        report_date = (report_dates[i] or "").strip() if i < len(report_dates) else ""
+        filing_date = (filing_dates[i] or "").strip() if i < len(filing_dates) else ""
+        if acc and report_date:
+            rows.append((acc, report_date, filing_date))
+    return rows
+
+
 def get_latest_13f_accession(cik: str) -> tuple[str | None, str | None]:
     """
     Get the accession number and report date for the latest 13F-HR filing.
     Returns (accession_number, report_date) or (None, None).
     """
+    acc, report_date, _ = get_latest_13f_filing(cik)
+    return acc, report_date
+
+
+def get_latest_13f_filing(cik: str) -> tuple[str | None, str | None, str | None]:
+    """Latest 13F-HR: (accession, report_date, filing_date)."""
     data = get_submissions(cik)
     if not data:
-        return None, None
-
-    filings = data.get("filings", {}).get("recent", {})
-    forms = filings.get("form", [])
-    accessions = filings.get("accessionNumber", [])
-    report_dates = filings.get("reportDate", [])
-
-    for i, form in enumerate(forms):
-        if form == "13F-HR":
-            acc = accessions[i] if i < len(accessions) else None
-            report_date = report_dates[i] if i < len(report_dates) else report_dates[i] or ""
-            if acc:
-                return acc, report_date or None
-    return None, None
+        return None, None, None
+    rows = _recent_13f_rows(data)
+    if not rows:
+        return None, None, None
+    acc, report_date, filing_date = rows[0]
+    return acc, report_date, filing_date or None
 
 
 def get_13f_filings_last_n_quarters(cik: str, n: int = 5) -> list[tuple[str, str]]:

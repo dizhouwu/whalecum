@@ -3,12 +3,11 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
-from config import get_funds
-from services.sec_client import (
-    get_13f_filings_last_n_quarters,
-    get_13f_holdings,
-    get_latest_13f_accession,
-)
+from api.metrics import enrich_holdings, filing_meta, total_portfolio_value
+from api.series import compute_changes, compute_high_conviction
+from config import DEFAULT_CHANGES_QUARTERS, DEFAULT_HISTORY_QUARTERS, get_funds
+from services.sec_client import get_13f_filings_last_n_quarters, get_13f_holdings, get_latest_13f_filing
+from services.ticker_map import attach_ticker
 
 router = APIRouter()
 
@@ -22,7 +21,7 @@ def _find_fund(cik: str):
 
 
 @router.get("/{cik}/history")
-def get_fund_history(cik: str, quarters: int = 5):
+def get_fund_history(cik: str, quarters: int = DEFAULT_HISTORY_QUARTERS):
     """Last N quarters of 13F holdings (time-series view)."""
     fund = _find_fund(cik)
     if not fund:
@@ -30,15 +29,16 @@ def get_fund_history(cik: str, quarters: int = 5):
 
     filings = get_13f_filings_last_n_quarters(fund["cik"], n=quarters)
     if not filings:
-        return {"fund": fund["name"], "cik": fund["cik"], "quarters": []}
+        return {"fund": fund["name"], "cik": fund["cik"], "quarters": [], "quarters_count": 0}
 
     quarters_data = []
     for i, (accession, report_date) in enumerate(filings):
         if i > 0:
             time.sleep(0.2)
         holdings = get_13f_holdings(fund["cik"], accession)
-        sorted_h = sorted(holdings, key=lambda h: h.get("value", 0), reverse=True)
-        total_value = sum(h.get("value", 0) for h in holdings)
+        total_value = total_portfolio_value(holdings)
+        enriched = [attach_ticker(h) for h in enrich_holdings(holdings, total_value)]
+        sorted_h = sorted(enriched, key=lambda h: h.get("value", 0), reverse=True)
         top5_val = sum(h.get("value", 0) for h in sorted_h[:5])
         top10_val = sum(h.get("value", 0) for h in sorted_h[:10])
         quarters_data.append({
@@ -53,77 +53,117 @@ def get_fund_history(cik: str, quarters: int = 5):
     return {
         "fund": fund["name"],
         "cik": fund["cik"],
+        "style": fund.get("style"),
         "quarters": quarters_data,
+        "quarters_count": len(quarters_data),
     }
 
 
-def get_fund_changes_data(cik: str) -> dict | None:
+def get_fund_changes_data(cik: str, quarters: int = DEFAULT_CHANGES_QUARTERS) -> dict | None:
     """
-    Returns position changes for one fund (double-downs, trims, new entries, exits, etc.)
-    or None if fund not found / insufficient data. Used by GET /funds/{cik}/changes and insights.
-    Includes high_conviction: positions the manager kept adding to across 2+ consecutive quarters.
+    Position changes for one fund: share-driven adds/trims, weights, high conviction.
     """
-    from api.series import compute_changes, compute_high_conviction
-
     fund = _find_fund(cik)
     if not fund:
         return None
 
-    filings = get_13f_filings_last_n_quarters(fund["cik"], n=5)
+    filings = get_13f_filings_last_n_quarters(fund["cik"], n=quarters)
+
+    empty = {
+        "fund": fund["name"],
+        "cik": fund["cik"],
+        "style": fund.get("style"),
+        "latest_report_date": filings[0][1] if filings else None,
+        "prev_report_date": None,
+        "window_quarters": quarters,
+        **filing_meta(filings[0][1] if filings else None, None),
+        "double_downs": [],
+        "trims": [],
+        "price_driven_adds": [],
+        "new_entries": [],
+        "exits": [],
+        "exits_from_5q": [],
+        "stalwarts": [],
+        "fading": [],
+        "new_in_5q": [],
+        "high_conviction": [],
+    }
+
     if len(filings) < 2:
-        return {
-            "fund": fund["name"],
-            "cik": fund["cik"],
-            "latest_report_date": filings[0][1] if filings else None,
-            "prev_report_date": None,
-            "double_downs": [],
-            "trims": [],
-            "new_entries": [],
-            "exits": [],
-            "exits_from_5q": [],
-            "stalwarts": [],
-            "fading": [],
-            "new_in_5q": [],
-            "high_conviction": [],
-        }
+        return empty
 
     acc_latest, date_latest = filings[0]
     acc_prev, date_prev = filings[1]
+    _, _, filing_latest = get_latest_13f_filing(fund["cik"])
+    meta = filing_meta(date_latest, filing_latest)
     time.sleep(0.2)
     latest_holdings = get_13f_holdings(fund["cik"], acc_latest)
     time.sleep(0.2)
     prev_holdings = get_13f_holdings(fund["cik"], acc_prev)
-    holdings_5q = None
+
+    holdings_oldest = None
     quarters_holdings_for_hc = [latest_holdings, prev_holdings]
 
     if len(filings) >= 5:
+        oldest_idx = len(filings) - 1
         time.sleep(0.2)
-        holdings_5q = get_13f_holdings(fund["cik"], filings[4][0])
-        # Fetch middle quarters for high-conviction (adds in 2+ consecutive quarters)
-        for idx in (2, 3):
+        holdings_oldest = get_13f_holdings(fund["cik"], filings[oldest_idx][0])
+        for idx in range(2, oldest_idx):
             time.sleep(0.2)
             quarters_holdings_for_hc.append(get_13f_holdings(fund["cik"], filings[idx][0]))
-        quarters_holdings_for_hc.append(holdings_5q)
+        quarters_holdings_for_hc.append(holdings_oldest)
 
-    changes = compute_changes(latest_holdings, prev_holdings, holdings_5q)
-    high_conviction = compute_high_conviction(quarters_holdings_for_hc, min_consecutive_adds=2) if len(quarters_holdings_for_hc) >= 2 else []
+    changes = compute_changes(
+        latest_holdings,
+        prev_holdings,
+        holdings_oldest,
+        material_only=True,
+        share_only_lists=False,
+    )
+    share_changes = compute_changes(
+        latest_holdings,
+        prev_holdings,
+        holdings_oldest,
+        material_only=True,
+        share_only_lists=True,
+    )
+    high_conviction = (
+        compute_high_conviction(quarters_holdings_for_hc, min_consecutive_adds=2, share_only=True)
+        if len(quarters_holdings_for_hc) >= 2
+        else []
+    )
+    high_conviction = [attach_ticker(h) for h in high_conviction]
+
+    def _attach_list(lst: list) -> list:
+        return [attach_ticker(h) for h in lst]
+
     return {
         "fund": fund["name"],
         "cik": fund["cik"],
+        "style": fund.get("style"),
         "latest_report_date": date_latest,
         "prev_report_date": date_prev,
-        **changes,
+        "window_quarters": quarters,
+        **meta,
+        "double_downs": _attach_list(changes["double_downs"]),
+        "share_adds": _attach_list(share_changes["double_downs"]),
+        "trims": _attach_list(changes["trims"]),
+        "share_trims": _attach_list(share_changes["trims"]),
+        "price_driven_adds": _attach_list(changes["price_driven_adds"]),
+        "new_entries": _attach_list(changes["new_entries"]),
+        "exits": _attach_list(changes["exits"]),
+        "exits_from_5q": _attach_list(changes["exits_from_5q"]),
+        "stalwarts": _attach_list(changes["stalwarts"]),
+        "fading": _attach_list(changes["fading"]),
+        "new_in_5q": _attach_list(changes["new_in_5q"]),
         "high_conviction": high_conviction,
     }
 
 
 @router.get("/{cik}/changes")
-def get_fund_changes(cik: str):
-    """
-    Position changes vs previous quarter: double-downs (added to), trims, new entries, exits.
-    Also exits_from_5q, stalwarts, fading, new_in_5q.
-    """
-    data = get_fund_changes_data(cik)
+def get_fund_changes(cik: str, quarters: int = DEFAULT_CHANGES_QUARTERS):
+    """Position changes vs previous quarter with weights and share-driven flags."""
+    data = get_fund_changes_data(cik, quarters=quarters)
     if data is None:
         raise HTTPException(404, f"Fund with CIK {cik} not found")
     return data
@@ -131,14 +171,17 @@ def get_fund_changes(cik: str):
 
 @router.get("")
 def list_funds():
-    """List tracked hedge funds with their latest 13F info. Fund list from funds.json."""
+    """List tracked hedge funds with their latest 13F info."""
     funds_with_filings = []
     for fund in get_funds():
-        accession, report_date = get_latest_13f_accession(fund["cik"])
+        accession, report_date, filing_date = get_latest_13f_filing(fund["cik"])
+        meta = filing_meta(report_date, filing_date)
         funds_with_filings.append({
             "name": fund["name"],
             "cik": fund["cik"],
+            "style": fund.get("style"),
             "latest_13f_accession": accession,
             "latest_report_date": report_date,
+            **meta,
         })
     return {"funds": funds_with_filings}

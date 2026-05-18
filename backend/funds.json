@@ -1,6 +1,6 @@
 [
-  {"name": "Whale Rock Capital Management", "cik": "0001387322"},
-  {"name": "Pershing Square Capital Management", "cik": "0001336528"},
-  {"name": "D1 Capital Partners", "cik": "0001747057"},
-  {"name": "SurgoCap Partners LP", "cik": "0001960830"}
+  {"name": "Whale Rock Capital Management", "cik": "0001387322", "style": "long_only_growth"},
+  {"name": "Pershing Square Capital Management", "cik": "0001336528", "style": "concentrated_activist"},
+  {"name": "D1 Capital Partners", "cik": "0001747057", "style": "crossover"},
+  {"name": "SurgoCap Partners LP", "cik": "0001960830", "style": "long_only_growth"}
 ]

@@ -1,20 +1,20 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
-
-interface Holding {
-  name: string
-  cusip?: string
-  value: number
-  shares: number
-  title_of_class?: string
-}
+import FilingLagBadge from '../components/FilingLagBadge'
+import HoldingTable, { HoldingRow } from '../components/HoldingTable'
+import { formatValue } from '../lib/format'
 
 interface HoldingsData {
   fund: string
   cik: string
   report_date: string
+  filing_date?: string
+  filing_lag_days?: number
+  filing_stale_warning?: boolean
   total_value?: number
-  holdings: Holding[]
+  concentration_pct_top5?: number
+  concentration_pct_top10?: number
+  holdings: HoldingRow[]
 }
 
 export default function HoldingsPage() {
@@ -30,19 +30,10 @@ export default function HoldingsPage() {
         if (!r.ok) throw new Error(r.statusText)
         return r.json()
       })
-      .then((res) => {
-        setData(cik ? { holdings: [res] } : res)
-      })
+      .then((res) => setData(cik ? { holdings: [res] } : res))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [cik])
-
-  const formatValue = (v: number) =>
-    new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-      maximumFractionDigits: 0,
-    }).format(v)
 
   if (loading) {
     return (
@@ -64,68 +55,35 @@ export default function HoldingsPage() {
     <div>
       <h1 className="font-display font-bold text-2xl mb-2">13F Holdings</h1>
       <p className="text-[var(--muted)] text-sm mb-8">
-        Latest quarter holdings from SEC filings
+        Latest quarter · click a name for cross-fund flow
       </p>
       {data.holdings.map((h) => (
         <div key={h.cik} className="mb-10">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
             <div>
-              <h2 className="font-semibold text-lg">
-                {h.fund}
-                <span className="text-[var(--muted)] font-normal ml-2">
-                  ({h.report_date})
-                </span>
-              </h2>
+              <h2 className="font-semibold text-lg">{h.fund}</h2>
+              <FilingLagBadge
+                reportDate={h.report_date}
+                filingDate={h.filing_date}
+                lagDays={h.filing_lag_days}
+                stale={h.filing_stale_warning}
+              />
               {h.total_value != null && (
-                <p className="text-[var(--muted)] text-sm mt-1">
-                  Portfolio value: {formatValue(h.total_value)}
+                <p className="text-[var(--muted)] text-sm mt-2">
+                  Portfolio {formatValue(h.total_value)}
+                  {h.concentration_pct_top5 != null && (
+                    <> · Top 5 {h.concentration_pct_top5}% · Top 10 {h.concentration_pct_top10}%</>
+                  )}
                 </p>
               )}
             </div>
             {!cik && (
-              <Link
-                to={`/holdings/${h.cik}`}
-                className="text-sm text-[var(--accent)] hover:underline"
-              >
-                View details →
+              <Link to={`/holdings/${h.cik}`} className="text-sm text-[var(--accent)] hover:underline">
+                Details →
               </Link>
             )}
           </div>
-          <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[var(--border)] bg-[var(--surface)]">
-                  <th className="text-left py-3 px-4 font-medium">Issuer</th>
-                  <th className="text-right py-3 px-4 font-medium">Value</th>
-                  <th className="text-right py-3 px-4 font-medium">Shares</th>
-                </tr>
-              </thead>
-              <tbody>
-                {h.holdings.length === 0 ? (
-                  <tr>
-                    <td colSpan={3} className="py-8 text-center text-[var(--muted)]">
-                      No holdings found
-                    </td>
-                  </tr>
-                ) : (
-                  h.holdings.map((holding, i) => (
-                    <tr
-                      key={i}
-                      className="border-b border-[var(--border)]/50 hover:bg-[var(--surface)]/50"
-                    >
-                      <td className="py-3 px-4">{holding.name}</td>
-                      <td className="text-right py-3 px-4 font-mono">
-                        {formatValue(holding.value)}
-                      </td>
-                      <td className="text-right py-3 px-4 font-mono">
-                        {holding.shares.toLocaleString()}
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+          <HoldingTable rows={h.holdings} showWeight />
         </div>
       ))}
     </div>

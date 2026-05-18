@@ -5,7 +5,7 @@
 ## Features
 
 - **Cross-section**: Same quarter across funds — Holdings and Insights (consensus / popular).
-- **Time-series**: 5 quarters per fund — see History and **Changes**:
+- **Time-series**: 8 quarters per fund — see History and **Changes** (share-driven adds, weights, materiality filters):
   - **Double-downs**: Positions the fund added to (increased size) vs previous quarter.
   - **New entries**: Positions opened this quarter.
   - **Exits**: Positions closed vs previous quarter.
@@ -78,10 +78,14 @@ Edit `backend/funds.json` (JSON array of `{"name": "...", "cik": "..."}`). Add a
 ## API
 
 - `GET /api/funds` — List funds (from funds.json) with latest 13F info
-- `GET /api/funds/{cik}/history?quarters=5` — Last 5 quarters of holdings (time-series)
+- `GET /api/funds/{cik}/history?quarters=8` — Last 8 quarters of holdings (time-series)
 - `GET /api/funds/{cik}/changes` — Double-downs, trims, new entries, exits, exits from 5q, stalwarts/fading/new_in_5q
 - `GET /api/holdings` — All funds' latest holdings (with total_value, concentration)
 - `GET /api/holdings/{cik}` — Single fund latest holdings (with concentration)
 - `GET /api/insights/consensus` — Stocks held by all funds
 - `GET /api/insights/popular` — Most held stocks across funds
-- `GET /api/insights/changes` — Cross-fund: consensus add, consensus exit, divergence
+- `GET /api/insights/action-list` — Ranked trade ideas with scores and signals
+- `GET /api/insights/changes` — Cross-fund: supermajority adds/exits, cluster flow, divergence
+- `GET /api/insights/overlap` — Top-20 holdings overlap matrix (Jaccard)
+- `GET /api/insights/backtest` — Naive hit-rate on prior share-add signals (13F price proxy)
+- `GET /api/insights/consensus?min_funds=3` — Holdings held by ≥N funds (default: all)

@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, LineChart, Line } from 'recharts'
+import FilingLagBadge from '../components/FilingLagBadge'
+import HoldingTable, { HoldingRow } from '../components/HoldingTable'
+import { formatValue, formatShort } from '../lib/format'
 
 interface Holding {
   name: string
@@ -39,21 +42,25 @@ interface ChangesData {
   fading?: Holding[]
   new_in_5q?: Holding[]
   high_conviction?: Holding[]
+  share_adds?: Holding[]
+  share_trims?: Holding[]
+  price_driven_adds?: Holding[]
+  filing_lag_days?: number
+  filing_stale_warning?: boolean
+  filing_date?: string
 }
 
 interface HoldingsResponse {
   fund: string
   report_date: string
+  filing_date?: string
+  filing_lag_days?: number
+  filing_stale_warning?: boolean
   total_value: number
   concentration_pct_top5?: number
   concentration_pct_top10?: number
-  holdings: Holding[]
+  holdings: HoldingRow[]
 }
-
-const formatValue = (v: number) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(v)
-const formatShort = (v: number) =>
-  v >= 1e9 ? `${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(0)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(0)}K` : String(v)
 
 export default function FundDetailPage() {
   const { cik } = useParams()
@@ -69,7 +76,7 @@ export default function FundDetailPage() {
     setLoading(true)
     Promise.all([
       fetch(`/api/holdings/${cik}`).then((r) => (r.ok ? r.json() : null)),
-      fetch(`/api/funds/${cik}/history?quarters=5`).then((r) => (r.ok ? r.json() : null)),
+      fetch(`/api/funds/${cik}/history?quarters=8`).then((r) => (r.ok ? r.json() : null)),
       fetch(`/api/funds/${cik}/changes`).then((r) => (r.ok ? r.json() : null)),
     ])
       .then(([h, hist, ch]) => {
@@ -105,7 +112,7 @@ export default function FundDetailPage() {
       </Link>
       <h1 className="font-display font-bold text-2xl mb-2">{name}</h1>
       <p className="text-[var(--muted)] text-sm mb-6">
-        Cross-section: latest quarter. Time-series: 5 quarters, double-downs & exits.
+        Latest quarter holdings · 8-quarter history · share-driven changes
       </p>
 
       <div className="flex gap-2 border-b border-[var(--border)] mb-6">
@@ -126,12 +133,20 @@ export default function FundDetailPage() {
 
       {activeTab === 'holdings' && holdings && (
         <section className="space-y-6">
-          <p className="text-[var(--muted)] text-sm">
-            Report date: {holdings.report_date} · Portfolio value: {formatValue(holdings.total_value)}
-            {holdings.concentration_pct_top5 != null && (
-              <> · Top 5: {holdings.concentration_pct_top5}% · Top 10: {holdings.concentration_pct_top10 ?? '—'}%</>
-            )}
-          </p>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <FilingLagBadge
+              reportDate={holdings.report_date}
+              filingDate={holdings.filing_date}
+              lagDays={holdings.filing_lag_days}
+              stale={holdings.filing_stale_warning}
+            />
+            <span className="text-[var(--muted)]">
+              Portfolio {formatValue(holdings.total_value)}
+              {holdings.concentration_pct_top5 != null && (
+                <> · Top 5 {holdings.concentration_pct_top5}% · Top 10 {holdings.concentration_pct_top10 ?? '—'}%</>
+              )}
+            </span>
+          </div>
           {holdings.holdings.length > 0 && (
             <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--surface)]/30">
               <h3 className="text-sm font-medium text-[var(--muted)] mb-3">Top 10 concentration (% of portfolio)</h3>
@@ -154,32 +169,13 @@ export default function FundDetailPage() {
               </div>
             </div>
           )}
-          <div className="rounded-lg border border-[var(--border)] overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[var(--border)] bg-[var(--surface)]">
-                  <th className="text-left py-3 px-4 font-medium">Issuer</th>
-                  <th className="text-right py-3 px-4 font-medium">Value</th>
-                  <th className="text-right py-3 px-4 font-medium">Shares</th>
-                </tr>
-              </thead>
-              <tbody>
-                {holdings.holdings.map((h, i) => (
-                  <tr key={i} className="border-b border-[var(--border)]/50 hover:bg-[var(--surface)]/50">
-                    <td className="py-3 px-4">{h.name}</td>
-                    <td className="text-right py-3 px-4 font-mono">{formatValue(h.value)}</td>
-                    <td className="text-right py-3 px-4 font-mono">{h.shares.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <HoldingTable rows={holdings.holdings} showWeight />
         </section>
       )}
 
       {activeTab === 'history' && history && (
         <section className="space-y-6">
-          <p className="text-[var(--muted)] text-sm">Last 5 quarters (time-series)</p>
+          <p className="text-[var(--muted)] text-sm">Last 8 quarters (time-series)</p>
           {history.quarters.length > 0 && (
             <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--surface)]/30">
               <h3 className="text-sm font-medium text-[var(--muted)] mb-3">Portfolio value over time</h3>
@@ -237,66 +233,22 @@ export default function FundDetailPage() {
 
       {activeTab === 'changes' && changes && (
         <section className="space-y-8">
-          <p className="text-[var(--muted)] text-sm">
-            Latest: {changes.latest_report_date} vs prev: {changes.prev_report_date}
-          </p>
-
-          <div>
-            <h3 className="font-semibold text-[var(--accent)] mb-2">Double-downs (added to)</h3>
-            <p className="text-[var(--muted)] text-xs mb-2">Positions the fund increased vs previous quarter — sorted by $ added</p>
-            {changes.double_downs.length === 0 ? (
-              <p className="text-[var(--muted)] text-sm">None</p>
-            ) : (
-              <>
-                {changes.double_downs.length > 0 && (
-                  <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--surface)]/30 mb-4">
-                    <h3 className="text-sm font-medium text-[var(--muted)] mb-2">$ added (top 12)</h3>
-                    <div className="h-64">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart
-                          data={changes.double_downs.slice(0, 12).map((h) => ({
-                            name: h.name.length > 14 ? h.name.slice(0, 13) + '…' : h.name,
-                            change: h.value_change ?? 0,
-                          }))}
-                          margin={{ bottom: 8, right: 24 }}
-                        >
-                          <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                          <YAxis tickFormatter={(v) => formatShort(v)} />
-                          <Tooltip formatter={(v: number) => [formatValue(v), 'Added']} />
-                          <Bar dataKey="change" fill="var(--success)" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-                )}
-                <div className="rounded-lg border border-[var(--border)] overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-[var(--border)] bg-[var(--surface)]">
-                        <th className="text-left py-2 px-4">Issuer</th>
-                        <th className="text-right py-2 px-4">Value</th>
-                        <th className="text-right py-2 px-4">$ Change</th>
-                        <th className="text-right py-2 px-4">%</th>
-                        <th className="text-right py-2 px-4">Shares Δ</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {changes.double_downs.map((h, i) => (
-                        <tr key={i} className="border-b border-[var(--border)]/50">
-                          <td className="py-2 px-4">{h.name}</td>
-                          <td className="text-right py-2 px-4 font-mono">{formatValue(h.value)}</td>
-                          <td className="text-right py-2 px-4 font-mono text-[var(--success)]">+{formatValue(h.value_change ?? 0)}</td>
-                          <td className="text-right py-2 px-4 font-mono text-[var(--success)]">{h.value_pct_change != null ? `+${h.value_pct_change}%` : '—'}</td>
-                          <td className="text-right py-2 px-4 font-mono">+{(h.shares_change ?? 0).toLocaleString()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )}
+          <div className="flex flex-wrap gap-3 items-center text-sm text-[var(--muted)]">
+            <span>Latest {changes.latest_report_date} vs {changes.prev_report_date}</span>
+            <FilingLagBadge lagDays={changes.filing_lag_days} stale={changes.filing_stale_warning} />
           </div>
 
+          <div>
+            <h3 className="font-semibold text-[var(--accent)] mb-2">Share adds (material)</h3>
+            <p className="text-[var(--muted)] text-xs mb-2">Share count increased — excludes price-only drift</p>
+            <HoldingTable
+              rows={changes.share_adds ?? changes.double_downs}
+              showWeight
+              showChange
+              showFlags
+              empty="No material share adds this quarter"
+            />
+          </div>
           <div>
             <h3 className="font-semibold text-[var(--accent)] mb-2">New entries</h3>
             <p className="text-[var(--muted)] text-xs mb-2">Positions opened this quarter</p>
@@ -408,33 +360,6 @@ export default function FundDetailPage() {
               </div>
             )}
           </div>
-
-          {(changes.high_conviction?.length ?? 0) > 0 && (
-            <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--surface)]/20">
-              <h3 className="font-semibold text-[var(--accent)] mb-2">High conviction</h3>
-              <p className="text-[var(--muted)] text-xs mb-3">Positions the manager kept adding to in the same direction across 2+ consecutive quarters</p>
-              <div className="rounded border border-[var(--border)]/50 overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[var(--border)] bg-[var(--surface)]/50">
-                      <th className="text-left py-2 px-4">Issuer</th>
-                      <th className="text-right py-2 px-4">Value</th>
-                      <th className="text-right py-2 px-4">Quarters added</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {changes.high_conviction!.map((h, i) => (
-                      <tr key={i} className="border-b border-[var(--border)]/50">
-                        <td className="py-2 px-4">{h.name}</td>
-                        <td className="text-right py-2 px-4 font-mono">{formatValue(h.value)}</td>
-                        <td className="text-right py-2 px-4 font-mono text-[var(--accent)]">{h.quarters_added ?? '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
 
           {(changes.high_conviction?.length ?? 0) > 0 && (
             <div className="rounded-lg border border-[var(--border)] p-4 bg-[var(--surface)]/20">

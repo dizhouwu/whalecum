@@ -1,31 +1,23 @@
 """
 Time-series and position-change logic for 13F.
-Compares quarters to detect double-downs (added to), trims, exits, new entries,
-and 5-quarter buckets: stalwarts, fading, new_in_5q.
+Share-driven vs price-driven moves, portfolio weights, materiality filters.
 """
 from __future__ import annotations
 
 from typing import Any
 
-
-def _holding_key(h: dict) -> str:
-    """Stable key for matching same position across quarters. CUSIP preferred."""
-    cusip = (h.get("cusip") or "").strip()
-    if cusip and len(cusip) >= 9:
-        return cusip
-    return _normalize_name(h.get("name") or "")
-
-
-def _normalize_name(name: str) -> str:
-    n = (name or "").upper().strip()
-    for suffix in (" INC", " CORP", " CO", " LTD", " PLC", " LP", " LLC", " CL A", " COM"):
-        if n.endswith(suffix):
-            n = n[: -len(suffix)].strip()
-    return n
+from api.metrics import (
+    enrich_holdings,
+    holding_key,
+    is_material_change,
+    normalize_name,
+    price_proxy_return,
+    total_portfolio_value,
+)
 
 
 def _holdings_by_key(holdings: list[dict]) -> dict[str, dict]:
-    return {_holding_key(h): h for h in holdings if _holding_key(h)}
+    return {holding_key(h): h for h in holdings if holding_key(h)}
 
 
 def _pct_change(prev: float, curr: float) -> float | None:
@@ -34,103 +26,190 @@ def _pct_change(prev: float, curr: float) -> float | None:
     return round(100.0 * (curr - prev) / prev, 1)
 
 
+def _weight_pct(value: int, total: int) -> float:
+    return round(100.0 * value / total, 2) if total else 0.0
+
+
+def _classify_position_change(
+    curr: dict,
+    prev: dict,
+    total_latest: int,
+    total_prev: int,
+) -> dict[str, Any] | None:
+    """Build change row with share/price/material flags. Returns None if no change."""
+    curr_val = curr.get("value", 0) or 0
+    prev_val = prev.get("value", 0) or 0
+    curr_shr = curr.get("shares", 0) or 0
+    prev_shr = prev.get("shares", 0) or 0
+    val_chg = curr_val - prev_val
+    shr_chg = curr_shr - prev_shr
+
+    w_curr = _weight_pct(curr_val, total_latest)
+    w_prev = _weight_pct(prev_val, total_prev)
+    w_chg = round(w_curr - w_prev, 2)
+
+    share_up = curr_shr > prev_shr
+    share_down = curr_shr < prev_shr
+    value_up = curr_val > prev_val
+    value_down = curr_val < prev_val
+
+    if not (value_up or value_down or share_up or share_down):
+        return None
+
+    share_driven = share_up or share_down
+    price_driven = (value_up and not share_up) or (value_down and not share_down)
+    if share_up and value_up:
+        direction = "add"
+    elif share_down and value_down:
+        direction = "trim"
+    elif share_up:
+        direction = "add"
+    elif share_down:
+        direction = "trim"
+    elif value_up:
+        direction = "add"
+        price_driven = True
+        share_driven = False
+    else:
+        direction = "trim"
+        price_driven = True
+        share_driven = False
+
+    material = is_material_change(val_chg, w_chg)
+
+    return {
+        **curr,
+        "prev_value": prev_val,
+        "prev_shares": prev_shr,
+        "prev_weight_pct": w_prev,
+        "weight_pct": w_curr,
+        "weight_pct_change": w_chg,
+        "value_change": val_chg,
+        "shares_change": shr_chg,
+        "value_pct_change": _pct_change(prev_val, curr_val),
+        "price_proxy_return_pct": price_proxy_return(prev, curr),
+        "share_driven": share_driven,
+        "price_driven": price_driven,
+        "material": material,
+        "direction": direction,
+    }
+
+
 def compute_changes(
     latest_holdings: list[dict],
     prev_holdings: list[dict],
-    holdings_5q_ago: list[dict] | None = None,
+    holdings_oldest: list[dict] | None = None,
+    *,
+    material_only: bool = True,
+    share_only_lists: bool = False,
 ) -> dict[str, Any]:
     """
-    Compare latest vs previous quarter (and optionally vs 5 quarters ago).
-    Returns:
-      - double_downs: positions increased (sorted by value_change desc)
-      - trims: positions decreased (in both quarters)
-      - new_entries: in latest, not in prev
-      - exits: in prev, not in latest (sorted by prev value desc)
-      - exits_from_5q: in 5q_ago, not in latest
-      - stalwarts: in both latest and 5q_ago, current value > 5q value (adding over 5q)
-      - fading: in both latest and 5q_ago, current value < 5q value (reducing over 5q)
-      - new_in_5q: in latest, not in 5q_ago (first appearance in 5-quarter window)
+    Compare latest vs previous quarter (and optionally vs oldest in window).
+    share_only_lists: if True, double_downs/trims only include share-driven moves.
     """
-    latest = _holdings_by_key(latest_holdings)
-    prev = _holdings_by_key(prev_holdings)
-    old5 = _holdings_by_key(holdings_5q_ago or [])
+    total_latest = total_portfolio_value(latest_holdings)
+    total_prev = total_portfolio_value(prev_holdings)
+    latest = _holdings_by_key(enrich_holdings(latest_holdings, total_latest))
+    prev = _holdings_by_key(enrich_holdings(prev_holdings, total_prev))
+    old = _holdings_by_key(holdings_oldest or [])
 
-    double_downs = []
-    trims = []
+    double_downs: list[dict] = []
+    trims: list[dict] = []
+    price_driven_adds: list[dict] = []
+
     for key, curr in latest.items():
         if key not in prev:
             continue
-        p = prev[key]
-        curr_val = curr.get("value", 0) or 0
-        curr_shr = curr.get("shares", 0) or 0
-        prev_val = p.get("value", 0) or 0
-        prev_shr = p.get("shares", 0) or 0
-        val_chg = curr_val - prev_val
-        shr_chg = curr_shr - prev_shr
-        if curr_val > prev_val or curr_shr > prev_shr:
-            double_downs.append({
-                **curr,
-                "prev_value": prev_val,
-                "prev_shares": prev_shr,
-                "value_change": val_chg,
-                "shares_change": shr_chg,
-                "value_pct_change": _pct_change(prev_val, curr_val),
-            })
-        elif curr_val < prev_val or curr_shr < prev_shr:
-            trims.append({
-                **curr,
-                "prev_value": prev_val,
-                "prev_shares": prev_shr,
-                "value_change": val_chg,
-                "shares_change": shr_chg,
-                "value_pct_change": _pct_change(prev_val, curr_val),
-            })
+        row = _classify_position_change(curr, prev[key], total_latest, total_prev)
+        if not row:
+            continue
+        if material_only and not row["material"]:
+            continue
+        if row["direction"] == "add":
+            if share_only_lists and not row["share_driven"]:
+                if row["price_driven"]:
+                    price_driven_adds.append(row)
+                continue
+            double_downs.append(row)
+        else:
+            if share_only_lists and not row["share_driven"]:
+                continue
+            trims.append(row)
 
-    new_entries = [latest[k] for k in latest if k not in prev]
-    exits = [prev[k] for k in prev if k not in latest]
-    exits_from_5q = [old5[k] for k in old5 if k not in latest] if old5 else []
+    new_entries_raw = [latest[k] for k in latest if k not in prev]
+    new_entries = []
+    for h in new_entries_raw:
+        row = dict(h)
+        row["weight_pct"] = _weight_pct(h.get("value", 0) or 0, total_latest)
+        if not material_only or is_material_change(h.get("value", 0) or 0, row["weight_pct"]):
+            new_entries.append(row)
+
+    exits = []
+    for key in prev:
+        if key not in latest:
+            h = dict(prev[key])
+            h["weight_pct"] = _weight_pct(h.get("value", 0) or 0, total_prev)
+            if not material_only or is_material_change(h.get("value", 0) or 0, h["weight_pct"]):
+                exits.append(h)
+
+    exits_from_old = []
+    if old:
+        for key in old:
+            if key not in latest:
+                h = dict(old[key])
+                if not material_only or is_material_change(h.get("value", 0) or 0, None):
+                    exits_from_old.append(h)
 
     stalwarts = []
     fading = []
-    new_in_5q = []
-    if old5:
+    new_in_window = []
+    if old:
+        total_old = total_portfolio_value(holdings_oldest or [])
         for key, curr in latest.items():
-            if key not in old5:
-                new_in_5q.append(curr)
+            if key not in old:
+                new_in_window.append(curr)
                 continue
-            o = old5[key]
+            o = old[key]
             curr_val = curr.get("value", 0) or 0
             old_val = o.get("value", 0) or 0
             if curr_val > old_val:
-                stalwarts.append({**curr, "value_5q_ago": old_val, "value_change_5q": curr_val - old_val})
+                stalwarts.append({
+                    **curr,
+                    "value_oldest": old_val,
+                    "value_change_window": curr_val - old_val,
+                    "weight_pct": _weight_pct(curr_val, total_latest),
+                })
             elif curr_val < old_val:
-                fading.append({**curr, "value_5q_ago": old_val, "value_change_5q": curr_val - old_val})
-        stalwarts.sort(key=lambda h: h.get("value_change_5q", 0), reverse=True)
-        fading.sort(key=lambda h: h.get("value_change_5q", 0))
-        new_in_5q.sort(key=lambda h: h.get("value", 0), reverse=True)
+                fading.append({
+                    **curr,
+                    "value_oldest": old_val,
+                    "value_change_window": curr_val - old_val,
+                    "weight_pct": _weight_pct(curr_val, total_latest),
+                })
+        stalwarts.sort(key=lambda h: h.get("value_change_window", 0), reverse=True)
+        fading.sort(key=lambda h: h.get("value_change_window", 0))
+        new_in_window.sort(key=lambda h: h.get("value", 0), reverse=True)
 
     return {
         "double_downs": sorted(double_downs, key=lambda h: h.get("value_change", 0), reverse=True),
         "trims": sorted(trims, key=lambda h: h.get("value_change", 0)),
+        "price_driven_adds": sorted(price_driven_adds, key=lambda h: h.get("value_change", 0), reverse=True),
         "new_entries": sorted(new_entries, key=lambda h: h.get("value", 0), reverse=True),
         "exits": sorted(exits, key=lambda h: h.get("value", 0), reverse=True),
-        "exits_from_5q": sorted(exits_from_5q, key=lambda h: h.get("value", 0), reverse=True),
+        "exits_from_5q": sorted(exits_from_old, key=lambda h: h.get("value", 0), reverse=True),
         "stalwarts": stalwarts,
         "fading": fading,
-        "new_in_5q": new_in_5q,
+        "new_in_5q": new_in_window,
     }
 
 
 def compute_high_conviction(
     quarters_holdings: list[list[dict]],
     min_consecutive_adds: int = 2,
+    *,
+    share_only: bool = True,
 ) -> list[dict]:
-    """
-    High-conviction bets: positions the manager kept adding to in the same direction
-    across multiple consecutive quarters. Requires at least min_consecutive_adds (default 2)
-    quarter-over-quarter increases. quarters_holdings = [latest, q1_ago, q2_ago, ...] (most recent first).
-    Returns list of holdings from latest quarter with quarters_added count.
-    """
+    """Positions with consecutive share-count increases across quarters."""
     if len(quarters_holdings) < 2 or min_consecutive_adds < 1:
         return []
 
@@ -141,15 +220,18 @@ def compute_high_conviction(
         for key, c in curr.items():
             if key not in prev:
                 continue
-            p = prev[key]
-            cv = c.get("value", 0) or 0
-            pv = p.get("value", 0) or 0
             cs = c.get("shares", 0) or 0
-            ps = p.get("shares", 0) or 0
-            if cv > pv or cs > ps:
+            ps = prev[key].get("shares", 0) or 0
+            cv = c.get("value", 0) or 0
+            pv = prev[key].get("value", 0) or 0
+            if share_only:
+                if cs > ps:
+                    add_count[key] = add_count.get(key, 0) + 1
+            elif cv > pv or cs > ps:
                 add_count[key] = add_count.get(key, 0) + 1
 
-    latest = _holdings_by_key(quarters_holdings[0])
+    total = total_portfolio_value(quarters_holdings[0])
+    latest = _holdings_by_key(enrich_holdings(quarters_holdings[0], total))
     result = []
     for key, count in add_count.items():
         if count >= min_consecutive_adds and key in latest:
